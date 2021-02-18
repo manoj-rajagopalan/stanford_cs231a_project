@@ -58,7 +58,8 @@ print('\nLeft color stereo camera focal length = ', color_stereo_left_cam_f * 10
 # Try to comprehend what depths the stereo system can resolve
 # depth = Baseline * focal_length / disparity
 color_stereo_baseline = kitti.calib.b_rgb
-color_stereo_disparity_for_1m_depth = color_stereo_baseline * color_stereo_left_cam_f / 1.0
+color_stereo_disparity_for_1m_depth = color_stereo_baseline * color_stereo_left_cam_f / 1.0 # in metres
+
 # convert disparity from metres to pixels
 color_stereo_disparity_pixels_for_1m_depth = \
     color_stereo_disparity_for_1m_depth / color_stereo_left_cam_x_pixel_width
