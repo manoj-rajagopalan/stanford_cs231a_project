@@ -14,7 +14,7 @@ WEIGHTS=${WEIGHTS:-${SCRIPT_DIR}/../../psmnet-pretrained_model_KITTI2015.tar}
 # echo " - WEIGHTS = ${WEIGHTS}"
 # echo
 
-CMD="${PY3} pykitti-psmnet.py --base-dir ${BASE_DIR} \
+CMD="${PY3} pykitti-psmnet.py --base_dir ${BASE_DIR} \
                               --date ${DATE} \
                               --drive ${DRIVE} \
                               --pretrained_weights_path ${WEIGHTS}"
