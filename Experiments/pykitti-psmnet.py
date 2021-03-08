@@ -2,12 +2,16 @@ import numpy as np
 import argparse
 import sys
 
-import torch
-import torchvision
 from matplotlib import pyplot as plt
 
+import cv2 as cv
+
+import torch
+import torch.nn.functional
+import torchvision.transforms
+
 import pykitti
-import PSMNet
+import PSMNet.models
 
 # global preprocessing transform (from PSMNet Test_img.py)
 normal_mean_var = {'mean': [0.485, 0.456, 0.406],
@@ -48,16 +52,16 @@ def parse_cmdline():
 # /parse_cmdline()
 
 def load_model(pretrained_weights_path):
-    model = PSMNet.models.stackhourglass.PSMNet(maxdisp=192)
+    model = PSMNet.models.stackhourglass(maxdisp=192)
     state_dict = torch.load(pretrained_weights_path)
-    model.load_state_dict(state_dict['state_dict'])
     model = torch.nn.DataParallel(model, device_ids=[0])
+    model.load_state_dict(state_dict['state_dict'])
     model.eval() # prep for inference
     return model
 # /load_model()
 
 def load_image_pair(kitti, frame_number):
-    imgL_in, imgR_in = kitti.get_rgb(f)
+    imgL_in, imgR_in = kitti.get_rgb(frame_number)
 
     # following steps from PSMNet Test_img.py
     imgL = infer_transform(imgL_in)
@@ -76,8 +80,8 @@ def load_image_pair(kitti, frame_number):
     else:
         right_pad = 0    
 
-    imgL = F.pad(imgL,(0,right_pad, top_pad,0)).unsqueeze(0)
-    imgR = F.pad(imgR,(0,right_pad, top_pad,0)).unsqueeze(0)
+    imgL = torch.nn.functional.pad(imgL,(0,right_pad, top_pad,0)).unsqueeze(0)
+    imgR = torch.nn.functional.pad(imgR,(0,right_pad, top_pad,0)).unsqueeze(0)
 
     return imgL, imgR
 # /load_image_pair()
@@ -97,8 +101,9 @@ def do_psmnet(kitti, frame_range, model, use_cuda):
 
         disp = torch.squeeze(disp)
         disp_cpu = disp.data.cpu().numpy()
-        plt.imshow(disp_cpu)
-        plt.waitforbuttonpress()
+        cv.imwrite('disparity-frame{}.png'.format(frame_num), disp_cpu)
+        # plt.imshow(disp_cpu)
+        # plt.waitforbuttonpress()
     # /for f
 
 # /do_psmnet
