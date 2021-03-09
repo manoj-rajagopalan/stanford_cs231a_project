@@ -86,22 +86,53 @@ def load_image_pair(kitti, frame_number):
     return imgL, imgR
 # /load_image_pair()
 
+def kitti_stereo_left_focal_length(kitti):
+    color_stereo_left_cam_K = kitti.calib.K_cam2
+    # ... K[0,0] is f * k where f is focal length (along neg z-axis) and k is pixels/m along x-axis
+
+    # KITTI uses FL2-14S3C-C for its color stereo cameras (ref: http://www.cvlibs.net/datasets/kitti/setup.php)
+    # Googling for the datasheets, I got
+    # *  https://www.gophotonics.com/products/scientific-industrial-cameras/point-grey-research-inc/45-571-fl2-14s3c-c
+    # *  https://www.surplusgizmos.com/assets/images/flea2-FW-Datasheet.pdf
+    color_stereo_left_cam_x_pixel_width = 4.65e-6 # m
+    color_stereo_left_cam_f = color_stereo_left_cam_K[0,0] * color_stereo_left_cam_x_pixel_width
+    return color_stereo_left_cam_f
+# /kitti_stereo_left_focal_length()
+
 def do_psmnet(kitti, frame_range, model, use_cuda):
     if use_cuda:
         model.cuda()
 
+    B = kitti.calib.b_rgb # baseline, m
+    f = kitti_stereo_left_focal_length(kitti) # m
+    K = kitti.calib.K_cam2.astype(np.float64) # intrinsics matrix for camera #2 (left stereo)
+
     for frame_num in frame_range:
-        print('Processing frame {}. Press any key.'.format(frame_num))
         left_img, right_img = load_image_pair(kitti, frame_num)
+        print('Processing frame {} shape = {}'.format(frame_num, left_img.shape))
         if use_cuda:
             left_img.cuda()
             right_img.cuda()
         with torch.no_grad():
-            disp = model(left_img, right_img)
+            disparity_field = model(left_img, right_img)
 
-        disp = torch.squeeze(disp)
-        disp_cpu = disp.data.cpu().numpy()
-        cv.imwrite('disparity-frame{}.png'.format(frame_num), disp_cpu)
+        disparity_field = torch.squeeze(disparity_field)
+        disparity_field_cpu = disparity_field.data.cpu().numpy()
+        cv.imwrite('disparity-frame{}.png'.format(frame_num),
+                   (disparity_field_cpu / 192.0 * 255).astype(np.uint8))
+        print('\tmin = {}, max = {}'.format(np.min(disparity_field_cpu),
+                                            np.max(disparity_field_cpu)))
+
+        z_field = (B * K[0,0]) / disparity_field_cpu
+        i_pix_coords, j_pix_coords = np.meshgrid(range(disparity_field_cpu.shape[0]),
+                                                 range(disparity_field_cpu.shape[1]),
+                                                 indexing = 'ij')
+        pt_cloud_in = np.dstack((i_pix_coords, j_pix_coords, np.ones(disparity_field_cpu.shape)))
+
+        # [X Y Z] = Z * K^{-1} [x y 1]^T
+        pt_cloud_out = z_field[:,:,np.newaxis] * np.linalg.solve(K, pt_cloud_in[..., np.newaxis]).squeeze() 
+        print('\tmin-z = {}, max-z = {}'.format(np.min(pt_cloud_out[:,:,2]),
+                                                np.max(pt_cloud_out[:,:,2])))
         # plt.imshow(disp_cpu)
         # plt.waitforbuttonpress()
     # /for f
