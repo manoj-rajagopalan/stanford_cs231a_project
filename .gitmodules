@@ -1,3 +1,3 @@
 [submodule "PSMNet"]
 	path = PSMNet
-	url = https://github.com/JiaRenChang/PSMNet.git
+	url = https://github.com/manoj-rajagopalan/stanford-cs230-PSMNet.git
