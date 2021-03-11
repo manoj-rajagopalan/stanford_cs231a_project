@@ -51,9 +51,13 @@ def parse_cmdline():
     return args
 # /parse_cmdline()
 
-def load_model(pretrained_weights_path):
+def load_model(pretrained_weights_path, use_cuda):
     model = PSMNet.models.stackhourglass(maxdisp=192)
-    state_dict = torch.load(pretrained_weights_path)
+    if use_cuda:
+        state_dict = torch.load(pretrained_weights_path)
+    else:
+        state_dict = torch.load(pretrained_weights_path, map_location=torch.device('cpu'))
+
     model = torch.nn.DataParallel(model, device_ids=[0])
     model.load_state_dict(state_dict['state_dict'])
     model.eval() # prep for inference
@@ -99,17 +103,33 @@ def kitti_stereo_left_focal_length(kitti):
     return color_stereo_left_cam_f
 # /kitti_stereo_left_focal_length()
 
+class BoundingBox:
+    def __init__(self, array_of_3d_pts):
+        self.xmin = np.min(array_of_3d_pts[:,0])
+        self.xmax = np.max(array_of_3d_pts[:,0])
+        self.ymin = np.min(array_of_3d_pts[:,1])
+        self.ymax = np.max(array_of_3d_pts[:,1])
+        self.zmin = np.min(array_of_3d_pts[:,2])
+        self.zmax = np.max(array_of_3d_pts[:,2])
+    # /def __init__()
+
+    def __str__(self):
+        return f"({self.xmin:.2f}, {self.ymin:.2f}, {self.zmin:.2f}) -> ({self.xmax:.2f}, {self.ymax:.2f}, {self.zmax:.2f})"
+
+# /class BoundingBox
+
 def do_psmnet(kitti, frame_range, model, use_cuda):
     if use_cuda:
         model.cuda()
+    else:
+        model.cpu()
 
     B = kitti.calib.b_rgb # baseline, m
-    f = kitti_stereo_left_focal_length(kitti) # m
     K = kitti.calib.K_cam2.astype(np.float64) # intrinsics matrix for camera #2 (left stereo)
 
     for frame_num in frame_range:
         left_img, right_img = load_image_pair(kitti, frame_num)
-        print('Processing frame {} shape = {}'.format(frame_num, left_img.shape))
+        print('\nProcessing frame {}'.format(frame_num))
         if use_cuda:
             left_img.cuda()
             right_img.cuda()
@@ -123,25 +143,32 @@ def do_psmnet(kitti, frame_range, model, use_cuda):
         print('\tmin = {}, max = {}'.format(np.min(disparity_field_cpu),
                                             np.max(disparity_field_cpu)))
 
-        z_field = (B * K[0,0]) / disparity_field_cpu
+        z_field = (B * K[0,0]) / (-disparity_field_cpu) # remember that disparity is signed, actually
         i_pix_coords, j_pix_coords = np.meshgrid(range(disparity_field_cpu.shape[0]),
                                                  range(disparity_field_cpu.shape[1]),
                                                  indexing = 'ij')
-        pt_cloud_in = np.dstack((i_pix_coords, j_pix_coords, np.ones(disparity_field_cpu.shape)))
+        # Note: swapped order of i and j in going to x and y
+        pt_cloud_in = np.dstack((j_pix_coords, i_pix_coords, np.ones(disparity_field_cpu.shape)))
 
         # [X Y Z] = Z * K^{-1} [x y 1]^T
         pt_cloud_out = z_field[:,:,np.newaxis] * np.linalg.solve(K, pt_cloud_in[..., np.newaxis]).squeeze() 
         print('\tmin-z = {}, max-z = {}'.format(np.min(pt_cloud_out[:,:,2]),
                                                 np.max(pt_cloud_out[:,:,2])))
-        # plt.imshow(disp_cpu)
-        # plt.waitforbuttonpress()
+        pt_cloud_out = pt_cloud_out.reshape(-1,3)
+        axis_aligned_bb = BoundingBox(pt_cloud_out)
+        print('\taxis_aligned_bb = ', axis_aligned_bb)
+
+        #- plt.imshow(disp_cpu)
+        #- plt.waitforbuttonpress()
+
     # /for f
 
 # /do_psmnet
 
+
 def main():
     args = parse_cmdline()
-    model = load_model(args.pretrained_weights_path)
+    model = load_model(args.pretrained_weights_path, args.use_cuda)
     kitti = pykitti.raw(args.base_dir, args.date, args.drive)
     do_psmnet(kitti, range(50,70), model, args.use_cuda)
 # /main()
