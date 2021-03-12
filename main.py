@@ -153,14 +153,15 @@ def pointCloud(disparity_field, B, K):
     pt_cloud_in = np.dstack((j_pix_coords, i_pix_coords, np.ones(disparity_field.shape)))
 
     # [X Y Z] = Z * K^{-1} [x y 1]^T
-    pt_cloud_out = z_field[:,:,np.newaxis] * np.linalg.solve(K, pt_cloud_in[..., np.newaxis]).squeeze() 
+    K_inv = np.linalg.inv(K)
+    pt_cloud_out = z_field[:,:,np.newaxis] * np.einsum('ij,xyj->xyi', K_inv, pt_cloud_in)
     print('\tmin-z = {}, max-z = {}'.format(np.min(pt_cloud_out[:,:,2]),
                                             np.max(pt_cloud_out[:,:,2])))
-    pt_cloud_out = pt_cloud_out.reshape(-1,3)
     return pt_cloud_out
 # /pointCloud()
 
 def yolov5Detections(yolov5, img, use_cuda):
+    orig_img_shape = img.shape
     img = preprocessForYolov5(img, use_cuda, stride=int(yolov5.stride.max()))
     yolov5_output = yolov5(img)[0]
     # Non-max suppression is required regardless of specific classes of interest.
@@ -178,8 +179,13 @@ def yolov5Detections(yolov5, img, use_cuda):
     assert len(predictions) == 1 # we process only 1 image at a time
     predictions = predictions[0] # extract the singleton (n,6) array
     predictions = predictions[predictions[:,4] > 0.8] # be reasonably sure!
-    bounding_boxes, confidences = predictions[:, 0:4], predictions[:,4]
-    return bounding_boxes, confidences, np.array(img.shape[2:4])
+    bboxes2D, confidences = predictions[:, 0:4], predictions[:,4]
+
+    # Restore original-image scale for bounding boxes (YOLO downsamples)
+    yolo_img_shape = np.array(img.shape[2:4])
+    bboxes2D_orig_scale = YOLOv5.utils.general.scale_coords(yolo_img_shape, bboxes2D, orig_img_shape)
+
+    return bboxes2D_orig_scale, confidences
 # /yolov5Detections()
 
 class BoundingBox:
@@ -196,6 +202,120 @@ class BoundingBox:
         return f"({self.xmin:.2f}, {self.ymin:.2f}, {self.zmin:.2f}) -> ({self.xmax:.2f}, {self.ymax:.2f}, {self.zmax:.2f})"
 
 # /class BoundingBox
+
+class Oriented3dBoundingBox:
+    def __init__(self, origin, axes, xmin, xmax, ymin, ymax, zmin, zmax):
+        assert origin.shape == (3,)
+        self.origin = origin
+        self.obj_to_cam = axes.T # col vectors form orthoNORMAL basis
+        self.xmin = xmin
+        self.xmax = xmax
+        self.ymin = ymin
+        self.ymax = ymax
+        self.zmin = zmin
+        self.zmax = zmax
+    # /__init__()
+
+    def draw(self, cv_img, K):
+        '''Draw self onto numpy array with cv color-channel order
+           using intrinsic matrix K'''
+
+        # OpenCV BGR color constants
+        red = (0,0,255)
+        green = (0,255,0)
+        blue = (255,0,0)
+
+        def uv(P_obj):
+            '''Compute pixel coords from object coords'''
+            P_cam = self.origin + np.dot(self.obj_to_cam, P_obj)
+            KP_cam = np.dot(K, P_cam).squeeze()
+            u = KP_cam[0] / KP_cam[2]
+            v = KP_cam[1] / KP_cam[2]
+            return int(u), int(v)
+        # /uv()
+
+        one_pixel_thick = 1
+
+        p_lo = uv(np.array([self.xmin, self.ymin, self.zmin]))
+        q_lo = uv(np.array([self.xmax, self.ymin, self.zmin]))
+        r_lo = uv(np.array([self.xmax, self.ymax, self.zmin]))
+        s_lo = uv(np.array([self.xmin, self.ymax, self.zmin]))
+        cv.line(cv_img, p_lo, q_lo, red,   one_pixel_thick)
+        cv.line(cv_img, r_lo, s_lo, red,   one_pixel_thick)
+        cv.line(cv_img, q_lo, r_lo, green, one_pixel_thick)
+        cv.line(cv_img, p_lo, s_lo, green, one_pixel_thick)
+
+        p_hi = uv(np.array([self.xmin, self.ymin, self.zmax]))
+        q_hi = uv(np.array([self.xmax, self.ymin, self.zmax]))
+        r_hi = uv(np.array([self.xmax, self.ymax, self.zmax]))
+        s_hi = uv(np.array([self.xmin, self.ymax, self.zmax]))
+        cv.line(cv_img, p_hi, q_hi, red,   one_pixel_thick)
+        cv.line(cv_img, r_hi, s_hi, red,   one_pixel_thick)
+        cv.line(cv_img, q_hi, r_hi, green, one_pixel_thick)
+        cv.line(cv_img, p_hi, s_hi, green, one_pixel_thick)
+
+        cv.line(cv_img, p_lo, p_hi, blue, one_pixel_thick)
+        cv.line(cv_img, q_lo, q_hi, blue, one_pixel_thick)
+        cv.line(cv_img, r_lo, r_hi, blue, one_pixel_thick)
+        cv.line(cv_img, s_lo, s_hi, blue, one_pixel_thick)
+    # /draw()
+
+# /class Oriented3dBoundingBox
+
+
+def detect3dObjects(pt_cloud_field, bboxes2D):
+    H, W = pt_cloud_field.shape[0:2]
+    objects = []
+    for bbox2D in bboxes2D:
+        # Slightly pad the 2D bounding box before extracting points
+        x1, y1, x2, y2 = bbox2D.int()
+        x1 = max(0, x1 - 3) # inclusive
+        y1 = max(0, y1 - 3) # inclusive
+        x2 = min(W, x2 + 4) # exclusive
+        y2 = min(H, y2 + 4) # exclusive
+
+        # extract
+        obj_pt_cloud = pt_cloud_field[x1:x2, y1:y2, :]
+        obj_pt_cloud = obj_pt_cloud.reshape(-1, 3) # make single list of 3D points
+
+        # filter out background
+        obj_pt_cloud = obj_pt_cloud[(obj_pt_cloud[:,2] > -200.0), :]
+
+        # debug using axis-aligned bounding box
+        use_axis_aligned_bb_for_debug = True
+        if use_axis_aligned_bb_for_debug:
+            obj_pt_cloud_center = np.mean(obj_pt_cloud, axis=0, keepdims=True)
+            obj_pt_cloud_relative = obj_pt_cloud - obj_pt_cloud_center
+            eigvecs = np.eye(3)
+            pca_xmin = np.min(obj_pt_cloud_relative[:,0])
+            pca_xmax = np.max(obj_pt_cloud_relative[:,0])
+            pca_ymin = np.min(obj_pt_cloud_relative[:,1])
+            pca_ymax = np.max(obj_pt_cloud_relative[:,1])
+            pca_zmin = np.min(obj_pt_cloud_relative[:,2])
+            pca_zmax = np.max(obj_pt_cloud_relative[:,2])
+
+        else: # PCA
+            obj_pt_cloud_center, eigvecs = cv.PCACompute(obj_pt_cloud, mean=None) # Note: 'center' is 2D matrix of dimension 1x3
+            obj_pt_cloud_in_pca_space = cv.PCAProject(obj_pt_cloud, obj_pt_cloud_center, eigvecs)
+            pca_xmin = np.min(obj_pt_cloud_in_pca_space[:,0])
+            pca_xmax = np.max(obj_pt_cloud_in_pca_space[:,0])
+            pca_ymin = np.min(obj_pt_cloud_in_pca_space[:,1])
+            pca_ymax = np.max(obj_pt_cloud_in_pca_space[:,1])
+            pca_zmin = np.min(obj_pt_cloud_in_pca_space[:,2])
+            pca_zmax = np.max(obj_pt_cloud_in_pca_space[:,2])
+        # if/else
+
+        obj_3d_bb = Oriented3dBoundingBox(obj_pt_cloud_center.squeeze(),
+                                          eigvecs,
+                                          pca_xmin, pca_xmax,
+                                          pca_ymin, pca_ymax,
+                                          pca_zmin, pca_zmax)
+        objects.append(obj_3d_bb)
+    # /for bbox2D
+
+    return objects
+# /detect3dObjects()
+
 
 def processFrames(kitti, frame_range, psmnet, yolov5, use_cuda):
 
@@ -214,29 +334,42 @@ def processFrames(kitti, frame_range, psmnet, yolov5, use_cuda):
         disparity_field = \
             psmnetDisparityField(psmnet, left_img, right_img, use_cuda)
 
-        # sequence of 3D points (x: right, y:top, z: back)
-        pt_cloud = pointCloud(disparity_field, B, K)
+        # Per-pixel 2D-array of 3D points (x: right, y:top, z: back)
+        pt_cloud_field = pointCloud(disparity_field, B, K)
 
-        axis_aligned_bb = BoundingBox(pt_cloud)
+        axis_aligned_bb = BoundingBox(pt_cloud_field.reshape(-1,3))
         print('\taxis_aligned_bb = ', axis_aligned_bb)
 
         # Use YOLOv5 detections to place a red 2D bounding box on disparities
-        bboxes2D, confidences, yolo_img_shape = \
-            yolov5Detections(yolov5, left_img, use_cuda)
+        bboxes2D, confidences = yolov5Detections(yolov5, left_img, use_cuda)
+
+        # Save intermediate results, for debug
+        with open(f'frame-{frame_num}.npz', 'wb') as f:
+            np.savez(f, pt_cloud_field=pt_cloud_field,
+                        bboxes2D=bboxes2D,
+                        confidences=confidences)
+
+        # list of Oriented3dBoundingBox
+        objects_3D = detect3dObjects(pt_cloud_field, bboxes2D)
+
+        # Render visualization image-files
         disparity_field = (disparity_field / 192.0 * 255).astype(np.uint8)
         disparity_field = np.dstack([disparity_field] * 3) # colorize
-        bboxes2D = YOLOv5.utils.general.scale_coords(yolo_img_shape, bboxes2D, left_img.shape)
-        for bb2D in bboxes2D:
-            x1, y1, x2, y2 = bb2D.int()
+        num_bboxes = len(bboxes2D)
+        assert num_bboxes == len(objects_3D)
+        for n in range(num_bboxes):
+            obj3D = objects_3D[n]
+            obj3D.draw(disparity_field, kitti.calib.K_cam2)
+
+            bb2D = bboxes2D[n].int()
+            x1, y1, x2, y2 = bb2D
             cv.rectangle(disparity_field,
                         (x1, y1), (x2, y2),
-                        color=[0,0,255], # BGR order for OpenCV
+                        color=[255,255,255], # BGR order for OpenCV
                         thickness=2, lineType=cv.LINE_AA)
+
         cv.imwrite('disparity-frame{}.png'.format(frame_num),
                     disparity_field)
-
-        #- plt.imshow(disp_cpu)
-        #- plt.waitforbuttonpress()
 
     # /for frame_num
 
@@ -248,7 +381,7 @@ def main():
     kitti = pykitti.raw(args.base_dir, args.date, args.drive)
     psmnet = loadPsmnet(args.psmnet_pretrained_weights, args.use_cuda)
     yolov5 = loadYolov5(args.yolov5_pretrained_weights, args.use_cuda)
-    processFrames(kitti, range(50,70), psmnet, yolov5, args.use_cuda)
+    processFrames(kitti, range(57,70), psmnet, yolov5, args.use_cuda)
 # /main()
 
 if __name__ == "__main__":
