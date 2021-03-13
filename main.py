@@ -18,6 +18,7 @@ import YOLOv5.utils.datasets
 import YOLOv5.utils.general
 import YOLOv5.utils
 
+
 # global preprocessing transform (from PSMNet Test_img.py)
 normal_mean_var = {'mean': [0.485, 0.456, 0.406],
                 'std': [0.229, 0.224, 0.225]}
@@ -137,27 +138,31 @@ def psmnetDisparityField(psmnet, left_img, right_img, use_cuda):
 
     disparity_field = torch.squeeze(disparity_field)
     disparity_field_cpu = disparity_field.data.cpu().numpy()
-    print('\tmin = {}, max = {}'.format(np.min(disparity_field_cpu),
-                                        np.max(disparity_field_cpu)))
+    print('\tmin disp = {}, max disp = {}'.format(np.min(disparity_field_cpu),
+                                                  np.max(disparity_field_cpu)))
     return disparity_field_cpu
 # /psmnetDisparityField()
 
 def pointCloud(disparity_field, B, K):
     # H x W numpy array of float
-    z_field = (B * K[0,0]) / (-disparity_field) # remember that disparity is signed, actually
+    z_field = (B * K[0,0]) / disparity_field
 
-    i_pix_coords, j_pix_coords = np.meshgrid(range(disparity_field.shape[0]),
-                                                range(disparity_field.shape[1]),
-                                                indexing = 'ij')
     # Note: swapped order of i and j in going to x and y
-    pt_cloud_in = np.dstack((j_pix_coords, i_pix_coords, np.ones(disparity_field.shape)))
-
+    pix_y_coords, pix_x_coords = np.meshgrid(range(disparity_field.shape[0]),
+                                             range(disparity_field.shape[1]),
+                                             indexing = 'ij')
+    # move origin to center of image
+    pix_x_coords = pix_x_coords - K[0,2]
+    pix_y_coords = pix_y_coords - K[1,2]
+    pt_cloud_init = np.dstack((pix_x_coords, pix_y_coords, np.ones(disparity_field.shape)))
+    K = K.copy() # modifying
+    K[0:2,2] = 0
     # [X Y Z] = Z * K^{-1} [x y 1]^T
     K_inv = np.linalg.inv(K)
-    pt_cloud_out = z_field[:,:,np.newaxis] * np.einsum('ij,xyj->xyi', K_inv, pt_cloud_in)
-    print('\tmin-z = {}, max-z = {}'.format(np.min(pt_cloud_out[:,:,2]),
-                                            np.max(pt_cloud_out[:,:,2])))
-    return pt_cloud_out
+    pt_cloud_field = z_field[:,:,np.newaxis] * np.einsum('ij,xyj->xyi', K_inv, pt_cloud_init)
+    print('\tmin-z = {}, max-z = {}'.format(np.min(pt_cloud_field[:,:,2]),
+                                            np.max(pt_cloud_field[:,:,2])))
+    return pt_cloud_field
 # /pointCloud()
 
 def yolov5Detections(yolov5, img, use_cuda):
@@ -179,13 +184,15 @@ def yolov5Detections(yolov5, img, use_cuda):
     assert len(predictions) == 1 # we process only 1 image at a time
     predictions = predictions[0] # extract the singleton (n,6) array
     predictions = predictions[predictions[:,4] > 0.8] # be reasonably sure!
-    bboxes2D, confidences = predictions[:, 0:4], predictions[:,4]
+    bboxes2D_yolo_scale, confidences = predictions[:, 0:4], predictions[:,4]
 
     # Restore original-image scale for bounding boxes (YOLO downsamples)
     yolo_img_shape = np.array(img.shape[2:4])
-    bboxes2D_orig_scale = YOLOv5.utils.general.scale_coords(yolo_img_shape, bboxes2D, orig_img_shape)
-
-    return bboxes2D_orig_scale, confidences
+    bboxes2D = YOLOv5.utils.general.scale_coords(yolo_img_shape,
+                                                 bboxes2D_yolo_scale,
+                                                 orig_img_shape)
+    bboxes2D = bboxes2D.numpy().astype(int) # tensor --> numpy, int-ify for pix coords
+    return bboxes2D, confidences
 # /yolov5Detections()
 
 class BoundingBox:
@@ -207,7 +214,7 @@ class Oriented3dBoundingBox:
     def __init__(self, origin, axes, xmin, xmax, ymin, ymax, zmin, zmax):
         assert origin.shape == (3,)
         self.origin = origin
-        self.obj_to_cam = axes.T # col vectors form orthoNORMAL basis
+        self.cam_from_obj = axes # col vectors form orthoNORMAL basis
         self.xmin = xmin
         self.xmax = xmax
         self.ymin = ymin
@@ -227,15 +234,16 @@ class Oriented3dBoundingBox:
 
         def uv(P_obj):
             '''Compute pixel coords from object coords'''
-            P_cam = self.origin + np.dot(self.obj_to_cam, P_obj)
+            P_cam = self.origin + np.dot(self.cam_from_obj, P_obj)
+            P_cam = P_cam / P_cam[2]
             KP_cam = np.dot(K, P_cam).squeeze()
-            u = KP_cam[0] / KP_cam[2]
-            v = KP_cam[1] / KP_cam[2]
+            u, v = KP_cam[0:2]
             return int(u), int(v)
         # /uv()
 
         one_pixel_thick = 1
 
+        # Compute pixel locations for bounding rectangle PQRS on z-min plane (lo)
         p_lo = uv(np.array([self.xmin, self.ymin, self.zmin]))
         q_lo = uv(np.array([self.xmax, self.ymin, self.zmin]))
         r_lo = uv(np.array([self.xmax, self.ymax, self.zmin]))
@@ -245,6 +253,7 @@ class Oriented3dBoundingBox:
         cv.line(cv_img, q_lo, r_lo, green, one_pixel_thick)
         cv.line(cv_img, p_lo, s_lo, green, one_pixel_thick)
 
+        # Compute pixel locations for bounding rectangle PQRS on z-max plane (hi)
         p_hi = uv(np.array([self.xmin, self.ymin, self.zmax]))
         q_hi = uv(np.array([self.xmax, self.ymin, self.zmax]))
         r_hi = uv(np.array([self.xmax, self.ymax, self.zmax]))
@@ -254,6 +263,7 @@ class Oriented3dBoundingBox:
         cv.line(cv_img, q_hi, r_hi, green, one_pixel_thick)
         cv.line(cv_img, p_hi, s_hi, green, one_pixel_thick)
 
+        # "Vertically" connect corresponding pixels for vertices on lo and hi planes
         cv.line(cv_img, p_lo, p_hi, blue, one_pixel_thick)
         cv.line(cv_img, q_lo, q_hi, blue, one_pixel_thick)
         cv.line(cv_img, r_lo, r_hi, blue, one_pixel_thick)
@@ -266,23 +276,40 @@ class Oriented3dBoundingBox:
 def detect3dObjects(pt_cloud_field, bboxes2D):
     H, W = pt_cloud_field.shape[0:2]
     objects = []
+    kmeans_criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 100, 0.1)
+    kmeans_attempts = 10
+    kmeans_flags = cv.KMEANS_RANDOM_CENTERS
+
     for bbox2D in bboxes2D:
         # Slightly pad the 2D bounding box before extracting points
-        x1, y1, x2, y2 = bbox2D.int()
-        x1 = max(0, x1 - 3) # inclusive
-        y1 = max(0, y1 - 3) # inclusive
-        x2 = min(W, x2 + 4) # exclusive
-        y2 = min(H, y2 + 4) # exclusive
+        x1, y1, x2, y2 = bbox2D.astype(int)
 
         # extract
-        obj_pt_cloud = pt_cloud_field[x1:x2, y1:y2, :]
+        obj_pt_cloud = pt_cloud_field[y1:y2, x1:x2, :] # Note swapped xy --> ij indexing
         obj_pt_cloud = obj_pt_cloud.reshape(-1, 3) # make single list of 3D points
 
-        # filter out background
-        obj_pt_cloud = obj_pt_cloud[(obj_pt_cloud[:,2] > -200.0), :]
+        print('\t-- Clustering --')
+        print('\t   Initial pt cloud size = ', len(obj_pt_cloud))
+
+        # filter out ground plane (KITTI cameras at 1.65 m from ground)
+        obj_pt_cloud = obj_pt_cloud[(obj_pt_cloud[:,1] < 1.6), :]
+        print('\t   After removing ground plane = ', len(obj_pt_cloud))
+
+        # 2-means clustering to filter out background based on distances of points from camera
+        obj_pt_cloud_distances = \
+            np.linalg.norm(obj_pt_cloud, axis=1).astype(np.float32)
+            # ... OpenCV KMeans algo asserts on single-precision float
+
+        compactness, labels, centers = \
+            cv.kmeans(obj_pt_cloud_distances, 2, None, kmeans_criteria, kmeans_attempts, kmeans_flags)
+        labels = labels.squeeze() # labels.shape = (N,1) for some reason
+        assert len(centers) == 2
+        obj_label = 0 if (centers[0] < centers[1]) else 1 # index of foreground obj
+        obj_pt_cloud = obj_pt_cloud[labels == obj_label]
+        print('\t   After clustering = ', len(obj_pt_cloud))
 
         # debug using axis-aligned bounding box
-        use_axis_aligned_bb_for_debug = True
+        use_axis_aligned_bb_for_debug = False
         if use_axis_aligned_bb_for_debug:
             obj_pt_cloud_center = np.mean(obj_pt_cloud, axis=0, keepdims=True)
             obj_pt_cloud_relative = obj_pt_cloud - obj_pt_cloud_center
@@ -294,7 +321,7 @@ def detect3dObjects(pt_cloud_field, bboxes2D):
             pca_zmin = np.min(obj_pt_cloud_relative[:,2])
             pca_zmax = np.max(obj_pt_cloud_relative[:,2])
 
-        else: # PCA
+        else: # PCA, the real deal
             obj_pt_cloud_center, eigvecs = cv.PCACompute(obj_pt_cloud, mean=None) # Note: 'center' is 2D matrix of dimension 1x3
             obj_pt_cloud_in_pca_space = cv.PCAProject(obj_pt_cloud, obj_pt_cloud_center, eigvecs)
             pca_xmin = np.min(obj_pt_cloud_in_pca_space[:,0])
@@ -306,7 +333,7 @@ def detect3dObjects(pt_cloud_field, bboxes2D):
         # if/else
 
         obj_3d_bb = Oriented3dBoundingBox(obj_pt_cloud_center.squeeze(),
-                                          eigvecs,
+                                          eigvecs.T, # want basis vecs in columns
                                           pca_xmin, pca_xmax,
                                           pca_ymin, pca_ymax,
                                           pca_zmin, pca_zmax)
@@ -316,6 +343,28 @@ def detect3dObjects(pt_cloud_field, bboxes2D):
     return objects
 # /detect3dObjects()
 
+def renderDebugImg(img_name, disparity_field, bboxes2D, bboxes3D, K):
+    '''Converts disparity_field into an image.
+       Draws a yellow 2D bounding box around objects of interest.
+       Projects 3D bounding box onto the image (rgb colors for xyz directions).'''
+
+    img_data = (disparity_field / 192.0 * 255).astype(np.uint8)
+    img_data = np.dstack([img_data] * 3) # mono --> color (BGR order for OpenCV)
+    num_bboxes = len(bboxes2D)
+    assert num_bboxes == len(bboxes3D)
+    for n in range(num_bboxes):
+        bb3D = bboxes3D[n]
+        bb3D.draw(img_data, K)
+
+        bb2D = bboxes2D[n]
+        x1, y1, x2, y2 = bb2D
+        cv.rectangle(img_data,
+                    (x1, y1), (x2, y2),
+                    color=[0,175,175], # BGR order for OpenCV
+                    thickness=1, lineType=cv.LINE_AA)
+
+    cv.imwrite(img_name, img_data)
+# /renderDebugImg()
 
 def processFrames(kitti, frame_range, psmnet, yolov5, use_cuda):
 
@@ -327,20 +376,18 @@ def processFrames(kitti, frame_range, psmnet, yolov5, use_cuda):
 
         #  pair of H x W x C=3 numpy arrays
         left_img, right_img = kitti.get_rgb(frame_num) # PIL images
-        left_img = np.array(left_img)
-        right_img = np.array(right_img)
+        left_img, right_img = np.array(left_img), np.array(right_img) # PIL --> numpy
 
         # H x W numpy array of float
         disparity_field = \
             psmnetDisparityField(psmnet, left_img, right_img, use_cuda)
 
-        # Per-pixel 2D-array of 3D points (x: right, y:top, z: back)
+        # H x W array of 3D points in camera coords (x:right, y:down, z:forward)
         pt_cloud_field = pointCloud(disparity_field, B, K)
 
-        axis_aligned_bb = BoundingBox(pt_cloud_field.reshape(-1,3))
-        print('\taxis_aligned_bb = ', axis_aligned_bb)
-
-        # Use YOLOv5 detections to place a red 2D bounding box on disparities
+        # YOLOv5
+        # - bboxes2D: (N,4) array of N 2D bounding boxes, each in (x1,y1,x2,y2) format
+        # - confidences: 1D array of confidences for each BB (N values)
         bboxes2D, confidences = yolov5Detections(yolov5, left_img, use_cuda)
 
         # Save intermediate results, for debug
@@ -350,30 +397,16 @@ def processFrames(kitti, frame_range, psmnet, yolov5, use_cuda):
                         confidences=confidences)
 
         # list of Oriented3dBoundingBox
-        objects_3D = detect3dObjects(pt_cloud_field, bboxes2D)
+        bboxes3D = detect3dObjects(pt_cloud_field, bboxes2D)
 
-        # Render visualization image-files
-        disparity_field = (disparity_field / 192.0 * 255).astype(np.uint8)
-        disparity_field = np.dstack([disparity_field] * 3) # colorize
-        num_bboxes = len(bboxes2D)
-        assert num_bboxes == len(objects_3D)
-        for n in range(num_bboxes):
-            obj3D = objects_3D[n]
-            obj3D.draw(disparity_field, kitti.calib.K_cam2)
-
-            bb2D = bboxes2D[n].int()
-            x1, y1, x2, y2 = bb2D
-            cv.rectangle(disparity_field,
-                        (x1, y1), (x2, y2),
-                        color=[255,255,255], # BGR order for OpenCV
-                        thickness=2, lineType=cv.LINE_AA)
-
-        cv.imwrite('disparity-frame{}.png'.format(frame_num),
-                    disparity_field)
+        renderDebugImg(f'disparity-frame{frame_num}.png',
+                       disparity_field,
+                       bboxes2D, bboxes3D,
+                       kitti.calib.K_cam2)
 
     # /for frame_num
 
-# /do_psmnet
+# /processFrames()
 
 
 def main():
