@@ -25,6 +25,7 @@
     python3 pykitti_test.py  /home/johndoe/CS231_Project/KITTI-2015   2021_01_23   0005
 '''
 
+import numpy as np
 import pykitti
 import sys
 
@@ -37,6 +38,8 @@ kitti = pykitti.raw(base_dir, date, drive)
 
 print('Cam2 (color stereo left) intrinsics: ')
 print(kitti.calib.K_cam2)
+print('Inverse:')
+print(np.linalg.inv(kitti.calib.K_cam2))
 
 print('\nCam1 (gray stereo right) matrix (full): ')
 print(kitti.calib.P_rect_10)
