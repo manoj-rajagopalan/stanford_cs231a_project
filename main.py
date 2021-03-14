@@ -38,6 +38,9 @@ def parseCmdline():
     parser.add_argument('--drive',
                         required = True,
                         help='NNNN formatted Drive number for the given date')
+    parser.add_argument('--frames',
+                        required=True,
+                        help='Range of frames to process in <first>,<last+1> format')
     parser.add_argument('--output_dir',
                         default='.',
                         help='Directory to (over)write results')
@@ -51,19 +54,41 @@ def parseCmdline():
                         action='store_true',
                         default=torch.cuda.is_available(),
                         help='Use GPU (CUDA) [default=True]')
+    parser.add_argument('--dump_openpcdet',
+                         action='store_true',
+                         default=False,
+                         help='Write per-frame point cloud out into .npy file in OpenPCDet format')
     args = parser.parse_args()
+    args.frames = tuple([int(x) for x in args.frames.split(',')])
 
     print('Using args ...')
     print('\tbase_dir = ', args.base_dir)
     print('\tdate = ', args.date)
     print('\tdrive = ', args.drive)
+    print('\tframes = ', args.frames)
     print('\toutput_dir = ', args.output_dir)
     print('\tpsmnet_pretrained_weights = ', args.psmnet_pretrained_weights)
     print('\tyolov5_pretrained_weights = ', args.yolov5_pretrained_weights)
     print('\tcuda = ', args.use_cuda)
+    print('\tdump_openpcdet = ', args.dump_openpcdet)
+
 
     return args
 # /parse_cmdline()
+
+def write_openpcdet(frame_num, obj_pt_cloud_list_kitti, output_dir):
+    # KITTI coord system:  x:right, y:down, z:front
+    # OpenPCD coord system: x:front, y:left, z:up
+    openpcd_from_kitti = np.array([[ 0,  0, 1],  # x <-- z
+                                   [-1,  0, 0],  # y <-- -x
+                                   [ 0, -1, 0]]) # z --> -y
+    for obj_num, obj_pt_cloud_kitti in enumerate(obj_pt_cloud_list_kitti):
+        obj_pt_cloud_openpcd = \
+            np.einsum('ij,nj->ni', openpcd_from_kitti, obj_pt_cloud_kitti)
+        with(open(output_dir + '/' + f'frame_{frame_num:03}-obj_{obj_num:03}.npy', 'wb')) as f:
+            np.save(f, obj_pt_cloud_openpcd)
+    # /for
+# /write_openpcdet()
 
 def loadPsmnet(psmnet_pretrained_weights, use_cuda):
     psmnet = PSMNet.models.stackhourglass(maxdisp=192)
@@ -279,7 +304,8 @@ class Oriented3dBoundingBox:
 
 def detect3dObjects(pt_cloud_field, bboxes2D):
     H, W = pt_cloud_field.shape[0:2]
-    objects = []
+    obj_3dbbox_list = []
+    obj_pt_cloud_list = []
     kmeans_criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 100, 0.1)
     kmeans_attempts = 10
     kmeans_flags = cv.KMEANS_RANDOM_CENTERS
@@ -336,15 +362,16 @@ def detect3dObjects(pt_cloud_field, bboxes2D):
             pca_zmax = np.max(obj_pt_cloud_in_pca_space[:,2])
         # if/else
 
-        obj_3d_bb = Oriented3dBoundingBox(obj_pt_cloud_center.squeeze(),
-                                          eigvecs.T, # want basis vecs in columns
-                                          pca_xmin, pca_xmax,
-                                          pca_ymin, pca_ymax,
-                                          pca_zmin, pca_zmax)
-        objects.append(obj_3d_bb)
+        obj_3dbbox = Oriented3dBoundingBox(obj_pt_cloud_center.squeeze(),
+                                           eigvecs.T, # want basis vecs in columns
+                                           pca_xmin, pca_xmax,
+                                           pca_ymin, pca_ymax,
+                                           pca_zmin, pca_zmax)
+        obj_3dbbox_list.append(obj_3dbbox)
+        obj_pt_cloud_list.append(obj_pt_cloud)
     # /for bbox2D
 
-    return objects
+    return obj_3dbbox_list, obj_pt_cloud_list
 # /detect3dObjects()
 
 def renderDebugImg(img_name, disparity_field, bboxes2D, bboxes3D, K):
@@ -370,7 +397,7 @@ def renderDebugImg(img_name, disparity_field, bboxes2D, bboxes3D, K):
     cv.imwrite(img_name, img_data)
 # /renderDebugImg()
 
-def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda):
+def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda, dump_openpcdet):
 
     B = kitti.calib.b_rgb # baseline, m
     K = kitti.calib.K_cam2.astype(np.float64) # intrinsics matrix for camera #2 (left stereo)
@@ -402,7 +429,7 @@ def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda):
                         confidences=confidences)
 
         # list of Oriented3dBoundingBox
-        bboxes3D = detect3dObjects(pt_cloud_field, bboxes2D)
+        bboxes3D, obj_pt_clouds = detect3dObjects(pt_cloud_field, bboxes2D)
 
         png_filename = f'disparity-frame-{frame_num:03}.png'
         renderDebugImg(output_dir + '/' + png_filename,
@@ -410,6 +437,8 @@ def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda):
                        bboxes2D, bboxes3D,
                        kitti.calib.K_cam2)
 
+        if(dump_openpcdet):
+            write_openpcdet(frame_num, obj_pt_clouds, output_dir)
     # /for frame_num
 
 # /processFrames()
@@ -420,7 +449,8 @@ def main():
     kitti = pykitti.raw(args.base_dir, args.date, args.drive)
     psmnet = loadPsmnet(args.psmnet_pretrained_weights, args.use_cuda)
     yolov5 = loadYolov5(args.yolov5_pretrained_weights, args.use_cuda)
-    processFrames(kitti, range(0,10), psmnet, yolov5, args.output_dir, args.use_cuda)
+    processFrames(kitti, range(*args.frames), psmnet, yolov5, args.output_dir,
+                  args.use_cuda, args.dump_openpcdet)
 # /main()
 
 if __name__ == "__main__":
