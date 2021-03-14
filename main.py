@@ -175,6 +175,7 @@ def psmnetDisparityField(psmnet, left_img, right_img, use_cuda):
 
 def pointCloud(disparity_field, B, K):
     # H x W numpy array of float
+    assert len(disparity_field.shape) == 2
     z_field = (B * K[0,0]) / disparity_field
 
     # Note: swapped order of i and j in going to x and y
@@ -376,6 +377,40 @@ def detect3dObjects(pt_cloud_field, bboxes2D):
     return obj_3dbbox_list, obj_pt_cloud_list
 # /detect3dObjects()
 
+def renderImages(frame_num, left_img, disparity_field, bboxes2D, bboxes3D, K, output_dir):
+    cv.imwrite(output_dir+'/'+f'{frame_num:03}-0_left.png', left_img)
+    cv.imwrite(output_dir+'/'+f'{frame_num:03}-1_disp.png', disparity_field)
+
+    # YOLO 2D bounding boxes
+    left_yolo_bb2d_img = left_img.copy()
+    disp_yolo_bb2d_img = np.dstack([disparity_field.copy()]*3)
+    num_bboxes = len(bboxes2D)
+    assert num_bboxes == len(bboxes3D)
+    for n in range(num_bboxes):
+        bb2D = bboxes2D[n]
+        x1, y1, x2, y2 = bb2D
+        cv.rectangle(left_yolo_bb2d_img,
+                    (x1, y1), (x2, y2),
+                    color=[0,0,255], # BGR order for OpenCV
+                    thickness=1, lineType=cv.LINE_AA)
+        cv.rectangle(disp_yolo_bb2d_img,
+                    (x1, y1), (x2, y2),
+                    color=[0,255,255], # BGR order for OpenCV
+                    thickness=1, lineType=cv.LINE_AA)
+    cv.imwrite(output_dir+'/'+f'{frame_num:03}-2_left_yolo.png', left_yolo_bb2d_img)
+    cv.imwrite(output_dir+'/'+f'{frame_num:03}-3_disp_yolo.png', disp_yolo_bb2d_img)
+
+    # PCA 3D bounding boxes
+    left_pca_bb3d_img = left_img.copy()
+    disp_pca_bb3d_img = np.dstack([disparity_field.copy()]*3)
+    for n in range(num_bboxes):
+        bb3D = bboxes3D[n]
+        bb3D.draw(left_pca_bb3d_img, K)
+        bb3D.draw(disp_pca_bb3d_img,  K)
+    cv.imwrite(output_dir+'/'+f'{frame_num:03}-4_left_pca.png', left_pca_bb3d_img)
+    cv.imwrite(output_dir+'/'+f'{frame_num:03}-5_disp_pca.png', disp_pca_bb3d_img)
+# /renderImages()
+
 def renderDebugImg(img_name, disparity_field, bboxes2D, bboxes3D, K):
     '''Converts disparity_field into an image.
        Draws a yellow 2D bounding box around objects of interest.
@@ -433,12 +468,13 @@ def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda, dump
         # list of Oriented3dBoundingBox
         bboxes3D, obj_pt_clouds = detect3dObjects(pt_cloud_field, bboxes2D)
 
-        png_filename = f'disparity-frame-{frame_num:03}.png'
-        renderDebugImg(output_dir + '/' + png_filename,
-                       disparity_field,
-                       bboxes2D, bboxes3D,
-                       kitti.calib.K_cam2)
+        # png_filename = f'disparity-frame-{frame_num:03}.png'
+        # renderDebugImg(output_dir + '/' + png_filename,
+        #                disparity_field,
+        #                bboxes2D, bboxes3D,
+        #                kitti.calib.K_cam2)
 
+        renderImages(frame_num, left_img, disparity_field, bboxes2D, bboxes3D, K, output_dir)
         if(dump_openpcdet):
             write_openpcdet(frame_num, obj_pt_clouds, output_dir)
     # /for frame_num
