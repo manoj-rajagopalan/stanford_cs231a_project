@@ -38,6 +38,9 @@ def parseCmdline():
     parser.add_argument('--drive',
                         required = True,
                         help='NNNN formatted Drive number for the given date')
+    parser.add_argument('--output_dir',
+                        default='.',
+                        help='Directory to (over)write results')
     parser.add_argument('--psmnet_pretrained_weights',
                         required=True,
                         help='Path to pretrained PSMNet weights file')
@@ -54,6 +57,7 @@ def parseCmdline():
     print('\tbase_dir = ', args.base_dir)
     print('\tdate = ', args.date)
     print('\tdrive = ', args.drive)
+    print('\toutput_dir = ', args.output_dir)
     print('\tpsmnet_pretrained_weights = ', args.psmnet_pretrained_weights)
     print('\tyolov5_pretrained_weights = ', args.yolov5_pretrained_weights)
     print('\tcuda = ', args.use_cuda)
@@ -366,7 +370,7 @@ def renderDebugImg(img_name, disparity_field, bboxes2D, bboxes3D, K):
     cv.imwrite(img_name, img_data)
 # /renderDebugImg()
 
-def processFrames(kitti, frame_range, psmnet, yolov5, use_cuda):
+def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda):
 
     B = kitti.calib.b_rgb # baseline, m
     K = kitti.calib.K_cam2.astype(np.float64) # intrinsics matrix for camera #2 (left stereo)
@@ -391,7 +395,8 @@ def processFrames(kitti, frame_range, psmnet, yolov5, use_cuda):
         bboxes2D, confidences = yolov5Detections(yolov5, left_img, use_cuda)
 
         # Save intermediate results, for debug
-        with open(f'frame-{frame_num}.npz', 'wb') as f:
+        npz_filename = f'frame-{frame_num:03}.npz'
+        with open(output_dir + '/' + npz_filename, 'wb') as f:
             np.savez(f, pt_cloud_field=pt_cloud_field,
                         bboxes2D=bboxes2D,
                         confidences=confidences)
@@ -399,7 +404,8 @@ def processFrames(kitti, frame_range, psmnet, yolov5, use_cuda):
         # list of Oriented3dBoundingBox
         bboxes3D = detect3dObjects(pt_cloud_field, bboxes2D)
 
-        renderDebugImg(f'disparity-frame{frame_num}.png',
+        png_filename = f'disparity-frame-{frame_num:03}.png'
+        renderDebugImg(output_dir + '/' + png_filename,
                        disparity_field,
                        bboxes2D, bboxes3D,
                        kitti.calib.K_cam2)
@@ -414,7 +420,7 @@ def main():
     kitti = pykitti.raw(args.base_dir, args.date, args.drive)
     psmnet = loadPsmnet(args.psmnet_pretrained_weights, args.use_cuda)
     yolov5 = loadYolov5(args.yolov5_pretrained_weights, args.use_cuda)
-    processFrames(kitti, range(57,70), psmnet, yolov5, args.use_cuda)
+    processFrames(kitti, range(0,10), psmnet, yolov5, args.output_dir, args.use_cuda)
 # /main()
 
 if __name__ == "__main__":
