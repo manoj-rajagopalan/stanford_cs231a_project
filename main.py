@@ -148,7 +148,8 @@ def preprocessForYolov5(img_in, use_cuda, stride=32, yolov5_img_size=640):
     # From YOLOv5.detect.detect()
     device = 'cuda:0' if use_cuda else 'cpu'
     img = torch.from_numpy(img).to(device)
-    img = img.half() if use_cuda else img.float()  # uint8 to fp16/32
+    # img = img.half() if use_cuda else img.float()  # uint8 to fp16/32
+    img = img.float()
     img /= 255.0  # 0 - 255 to 0.0 - 1.0
     if img.ndimension() == 3:
         img = img.unsqueeze(0)
@@ -220,7 +221,8 @@ def yolov5Detections(yolov5, img, use_cuda):
     bboxes2D = YOLOv5.utils.general.scale_coords(yolo_img_shape,
                                                  bboxes2D_yolo_scale,
                                                  orig_img_shape)
-    bboxes2D = bboxes2D.numpy().astype(int) # tensor --> numpy, int-ify for pix coords
+    bboxes2D = bboxes2D.cpu().numpy().astype(int) # tensor --> numpy, int-ify for pix coords
+    confidences = confidences.cpu()
     return bboxes2D, confidences
 # /yolov5Detections()
 
