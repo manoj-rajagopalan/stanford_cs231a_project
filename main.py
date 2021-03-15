@@ -11,12 +11,9 @@ import torchvision.transforms
 import pykitti
 import PSMNet.models
 
-import YOLOv5.models.experimental
-import YOLOv5.utils.datasets
-import YOLOv5.utils.general
-import YOLOv5.utils
-
 import datasets
+import yolov5
+
 
 # global preprocessing transform (from PSMNet Test_img.py)
 normal_mean_var = {'mean': [0.485, 0.456, 0.406],
@@ -53,6 +50,10 @@ def parseCmdline():
                         action='store_true',
                         default=torch.cuda.is_available(),
                         help='Use GPU (CUDA) [default=True]')
+    parser.add_argument('--visualize_using_pptk',
+                        action='store_true',
+                        default=False,
+                        help='Interactively visualize point clouds using PPTK viewer')
     parser.add_argument('--dump_openpcdet',
                          action='store_true',
                          default=False,
@@ -69,6 +70,7 @@ def parseCmdline():
     print('\tpsmnet_pretrained_weights = ', args.psmnet_pretrained_weights)
     print('\tyolov5_pretrained_weights = ', args.yolov5_pretrained_weights)
     print('\tcuda = ', args.use_cuda)
+    print('\tvisualize_using_pptk = ', args.visualize_using_pptk)
     print('\tdump_openpcdet = ', args.dump_openpcdet)
 
 
@@ -107,18 +109,6 @@ def loadPsmnet(psmnet_pretrained_weights, use_cuda):
     return psmnet
 # /load_psmnet()
 
-def loadYolov5(yolov5_pretrained_weights, use_cuda):
-    device = 'cuda:0' if use_cuda else 'cpu'
-    yolov5 = YOLOv5.models.experimental.attempt_load(yolov5_pretrained_weights,
-                                                     map_location=device)
-    yolov5.eval()
-    if use_cuda:
-        yolov5.cuda()
-    else:
-        yolov5.cpu()
-    return yolov5
-# /loadYolov5()
-
 def preprocessForPsmnet(imgL_in, imgR_in):
     
     # following steps from PSMNet Test_img.py
@@ -134,27 +124,6 @@ def preprocessForPsmnet(imgL_in, imgR_in):
 
     return imgL, imgR
 # /preprocessForPsmnet()
-
-def preprocessForYolov5(img_in, use_cuda, stride=32, yolov5_img_size=640):
-    # From YOLOv5.utils.datasets.LoadImages.__next__()
-    # Padded resize
-    img = \
-        YOLOv5.utils.datasets.letterbox(img_in, yolov5_img_size, stride=stride)[0]
-    # Convert
-    img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
-    img = np.ascontiguousarray(img)
-
-    # From YOLOv5.detect.detect()
-    device = 'cuda:0' if use_cuda else 'cpu'
-    img = torch.from_numpy(img).to(device)
-    # img = img.half() if use_cuda else img.float()  # uint8 to fp16/32
-    img = img.float()
-    img /= 255.0  # 0 - 255 to 0.0 - 1.0
-    if img.ndimension() == 3:
-        img = img.unsqueeze(0)
-
-    return img
-# /preprocessForYolov5()
 
 def psmnetDisparityField(psmnet, left_img, right_img, use_cuda):
     psmnet_left_img, psmnet_right_img = \
@@ -195,36 +164,6 @@ def pointCloud(disparity_field, B, K):
     return pt_cloud_field
 # /pointCloud()
 
-def yolov5Detections(yolov5, img, use_cuda):
-    orig_img_shape = img.shape
-    img = preprocessForYolov5(img, use_cuda, stride=int(yolov5.stride.max()))
-    yolov5_output = yolov5(img)[0]
-    # Non-max suppression is required regardless of specific classes of interest.
-    # But in this project we are interested only in cars, so filter on that.
-    # See YOLOv5/data/coco.yaml for list of classes.
-    predictions = \
-        YOLOv5.utils.general.non_max_suppression(yolov5_output, classes=[2])
-
-    # predictions is a list of (n,6) array where
-    # - n is the number of detections and
-    # - columns 0..3 store (x1,y1) and (x2,y2) for bounding boxes
-    # - column 4 stores confidence values
-    # - column 5 stores the integer class value
-
-    assert len(predictions) == 1 # we process only 1 image at a time
-    predictions = predictions[0] # extract the singleton (n,6) array
-    predictions = predictions[predictions[:,4] > 0.8] # be reasonably sure!
-    bboxes2D_yolo_scale, confidences = predictions[:, 0:4], predictions[:,4]
-
-    # Restore original-image scale for bounding boxes (YOLO downsamples)
-    yolo_img_shape = np.array(img.shape[2:4])
-    bboxes2D = YOLOv5.utils.general.scale_coords(yolo_img_shape,
-                                                 bboxes2D_yolo_scale,
-                                                 orig_img_shape)
-    bboxes2D = bboxes2D.cpu().numpy().astype(int) # tensor --> numpy, int-ify for pix coords
-    confidences = confidences.cpu()
-    return bboxes2D, confidences
-# /yolov5Detections()
 
 class BoundingBox:
     def __init__(self, array_of_3d_pts):
@@ -433,7 +372,7 @@ def renderDebugImg(img_name, disparity_field, bboxes2D, bboxes3D, K):
     cv.imwrite(img_name, img_data)
 # /renderDebugImg()
 
-def processFrames(kitti_raw_dataset, psmnet, yolov5, output_dir, use_cuda, dump_openpcdet):
+def processFrames(kitti_raw_dataset, psmnet, yolonet, output_dir, use_cuda, dump_openpcdet):
 
     #- B = kitti.calib.b_rgb # baseline, m
     #- K = kitti.calib.K_cam2.astype(np.float64) # intrinsics matrix for camera #2 (left stereo)
@@ -458,15 +397,16 @@ def processFrames(kitti_raw_dataset, psmnet, yolov5, output_dir, use_cuda, dump_
         # YOLOv5
         # - bboxes2D: (N,4) array of N 2D bounding boxes, each in (x1,y1,x2,y2) format
         # - confidences: 1D array of confidences for each BB (N values)
-        bboxes2D, confidences = yolov5Detections(yolov5, left_img, use_cuda)
+        bboxes2D, confidences = yolonet.detect(left_img, use_cuda)
 
         # Diagnose objects
-        for bb in bboxes2D:
+        for n, bb in enumerate(bboxes2D):
             disparity_field_obj = disparity_field[bb[1]:bb[3], bb[0]:bb[2]]
             min_obj_disp = np.min(disparity_field_obj)
-            max_obj_disp = np.min(disparity_field_obj)
-            print('\t* obj min disp = ', min_obj_disp, ' (', (B*K[0,0].min_obj_disp), 'm)')
-            print('\t* obj max disp = ', max_obj_disp, ' (', (B*K[0,0].max_obj_disp), 'm)')
+            max_obj_disp = np.max(disparity_field_obj)
+            print('\t#{} obj min disp = {} ({} m)'.format(n, min_obj_disp, B*K[0,0]/ min_obj_disp))
+            print('\t#{} obj max disp = {} ({} m)'.format(n, max_obj_disp, B*K[0,0]/ max_obj_disp))
+        # /for n,bb
 
         # Save intermediate results, for debug
         npz_filename = f'frame-{frame_num:03}.npz'
@@ -497,8 +437,8 @@ def main():
     kitti_raw_dataset = \
         datasets.KittiRawDataset(args.base_dir, args.date, args.drive, args.frames)
     psmnet = loadPsmnet(args.psmnet_pretrained_weights, args.use_cuda)
-    yolov5 = loadYolov5(args.yolov5_pretrained_weights, args.use_cuda)
-    processFrames(kitti_raw_dataset, psmnet, yolov5, args.output_dir,
+    yolonet = yolov5.YOLOnet(args.yolov5_pretrained_weights, args.use_cuda)
+    processFrames(kitti_raw_dataset, psmnet, yolonet, args.output_dir,
                   args.use_cuda, args.dump_openpcdet)
 # /main()
 
