@@ -2,8 +2,6 @@ import numpy as np
 import argparse
 import sys
 
-from matplotlib import pyplot as plt
-
 import cv2 as cv
 
 import torch
@@ -18,6 +16,7 @@ import YOLOv5.utils.datasets
 import YOLOv5.utils.general
 import YOLOv5.utils
 
+import datasets
 
 # global preprocessing transform (from PSMNet Test_img.py)
 normal_mean_var = {'mean': [0.485, 0.456, 0.406],
@@ -434,17 +433,20 @@ def renderDebugImg(img_name, disparity_field, bboxes2D, bboxes3D, K):
     cv.imwrite(img_name, img_data)
 # /renderDebugImg()
 
-def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda, dump_openpcdet):
+def processFrames(kitti_raw_dataset, psmnet, yolov5, output_dir, use_cuda, dump_openpcdet):
 
-    B = kitti.calib.b_rgb # baseline, m
-    K = kitti.calib.K_cam2.astype(np.float64) # intrinsics matrix for camera #2 (left stereo)
+    #- B = kitti.calib.b_rgb # baseline, m
+    #- K = kitti.calib.K_cam2.astype(np.float64) # intrinsics matrix for camera #2 (left stereo)
 
-    for frame_num in frame_range:
+    for data_frame in kitti_raw_dataset:
+        frame_num, left_img, right_img, B, K = data_frame
         print('\nProcessing frame {}'.format(frame_num))
+        # B is baseline, in metres
+        # K is intrinsic calibration matrix
 
-        #  pair of H x W x C=3 numpy arrays
-        left_img, right_img = kitti.get_rgb(frame_num) # PIL images
-        left_img, right_img = np.array(left_img), np.array(right_img) # PIL --> numpy
+        #-  pair of H x W x C=3 numpy arrays
+        #- left_img, right_img = kitti.get_rgb(frame_num) # PIL images
+        #- left_img, right_img = np.array(left_img), np.array(right_img) # PIL --> numpy
 
         # H x W numpy array of float
         disparity_field = \
@@ -457,6 +459,14 @@ def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda, dump
         # - bboxes2D: (N,4) array of N 2D bounding boxes, each in (x1,y1,x2,y2) format
         # - confidences: 1D array of confidences for each BB (N values)
         bboxes2D, confidences = yolov5Detections(yolov5, left_img, use_cuda)
+
+        # Diagnose objects
+        for bb in bboxes2D:
+            disparity_field_obj = disparity_field[bb[1]:bb[3], bb[0]:bb[2]]
+            min_obj_disp = np.min(disparity_field_obj)
+            max_obj_disp = np.min(disparity_field_obj)
+            print('\t* obj min disp = ', min_obj_disp, ' (', (B*K[0,0].min_obj_disp), 'm)')
+            print('\t* obj max disp = ', max_obj_disp, ' (', (B*K[0,0].max_obj_disp), 'm)')
 
         # Save intermediate results, for debug
         npz_filename = f'frame-{frame_num:03}.npz'
@@ -484,10 +494,11 @@ def processFrames(kitti, frame_range, psmnet, yolov5, output_dir, use_cuda, dump
 
 def main():
     args = parseCmdline()
-    kitti = pykitti.raw(args.base_dir, args.date, args.drive)
+    kitti_raw_dataset = \
+        datasets.KittiRawDataset(args.base_dir, args.date, args.drive, args.frames)
     psmnet = loadPsmnet(args.psmnet_pretrained_weights, args.use_cuda)
     yolov5 = loadYolov5(args.yolov5_pretrained_weights, args.use_cuda)
-    processFrames(kitti, range(*args.frames), psmnet, yolov5, args.output_dir,
+    processFrames(kitti_raw_dataset, psmnet, yolov5, args.output_dir,
                   args.use_cuda, args.dump_openpcdet)
 # /main()
 
