@@ -320,7 +320,7 @@ def processFrames(kitti_raw_dataset, psmnet, yolonet, output_dir, use_cuda, dump
 
     for data_frame in kitti_raw_dataset:
         frame_num, left_img, right_img, B, K = data_frame
-        print('\nProcessing frame {}'.format(frame_num))
+        print('\nProcessing frame {}. Image size = {}'.format(frame_num, left_img.shape))
         # B is baseline, in metres
         # K is intrinsic calibration matrix
 
