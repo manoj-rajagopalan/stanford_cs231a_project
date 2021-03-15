@@ -218,7 +218,7 @@ def detect3dObjects(pt_cloud_field, bboxes2D):
         assert len(centers) == 2
         obj_label = 0 if (centers[0] < centers[1]) else 1 # index of foreground obj
         obj_pt_cloud = obj_pt_cloud[labels == obj_label]
-        print('\t   After clustering = ', len(obj_pt_cloud))
+        print('\t   After clustering = ', len(obj_pt_cloud), ':', abs(centers[0] - centers[1]), 'm separation')
 
         # debug using axis-aligned bounding box
         use_axis_aligned_bb_for_debug = False
@@ -344,8 +344,8 @@ def processFrames(kitti_raw_dataset, psmnet, yolonet, output_dir, use_cuda, dump
             disparity_field_obj = disparity_field[bb[1]:bb[3], bb[0]:bb[2]]
             min_obj_disp = np.min(disparity_field_obj)
             max_obj_disp = np.max(disparity_field_obj)
-            print('\t#{} obj min disp = {} ({} m)'.format(n, min_obj_disp, B*K[0,0]/ min_obj_disp))
-            print('\t#{} obj max disp = {} ({} m)'.format(n, max_obj_disp, B*K[0,0]/ max_obj_disp))
+            print('\t#{} obj min disp = {:.1f} ({:.2f} m)'.format(n, min_obj_disp, B*K[0,0]/ min_obj_disp))
+            print('\t#{} obj max disp = {:.1f} ({:.2f} m)'.format(n, max_obj_disp, B*K[0,0]/ max_obj_disp))
         # /for n,bb
 
         # Save intermediate results, for debug

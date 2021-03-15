@@ -58,8 +58,8 @@ class PyramidalStereoMatchingNet:
 
         disparity_field = torch.squeeze(disparity_field)
         disparity_field_cpu = disparity_field.data.cpu().numpy()
-        print('\tmin disp = {}, max disp = {}'.format(np.min(disparity_field_cpu),
-                                                    np.max(disparity_field_cpu)))
+        print('\tmin disp = {:.2f}, max disp = {:.2f}'.format(np.min(disparity_field_cpu),
+                                                              np.max(disparity_field_cpu)))
         return disparity_field_cpu
     # /disparityField()
 
