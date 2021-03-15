@@ -46,8 +46,18 @@ class YOLOnet:
         # Non-max suppression is required regardless of specific classes of interest.
         # But in this project we are interested only in cars, so filter on that.
         # See YOLOv5/data/coco.yaml for list of classes.
+        coco_class_indices = [
+            0, # person
+            1, # bicycle
+            2, # car
+            3, # motorcycle
+            5, # bus
+            6, # train
+            7  # truck
+        ]
         predictions = \
-            YOLOv5.utils.general.non_max_suppression(yolov5_output, classes=[2])
+            YOLOv5.utils.general.non_max_suppression(yolov5_output,
+            classes=coco_class_indices)
 
         # predictions is a list of (n,6) array where
         # - n is the number of detections and
@@ -57,7 +67,7 @@ class YOLOnet:
 
         assert len(predictions) == 1 # we process only 1 image at a time
         predictions = predictions[0] # extract the singleton (n,6) array
-        predictions = predictions[predictions[:,4] > 0.8] # be reasonably sure!
+        predictions = predictions[predictions[:,4] > 0.6] # be reasonably sure!
         bboxes2D_yolo_scale, confidences = predictions[:, 0:4], predictions[:,4]
 
         # Restore original-image scale for bounding boxes (YOLO downsamples)
