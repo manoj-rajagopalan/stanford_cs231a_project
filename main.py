@@ -3,24 +3,14 @@ import argparse
 import sys
 
 import cv2 as cv
-
 import torch
-import torch.nn.functional
-import torchvision.transforms
 
 import pykitti
-import PSMNet.models
 
+# modules in this project
 import datasets
+import psm
 import yolov5
-
-
-# global preprocessing transform (from PSMNet Test_img.py)
-normal_mean_var = {'mean': [0.485, 0.456, 0.406],
-                'std': [0.229, 0.224, 0.225]}
-inference_transform = \
-    torchvision.transforms.Compose([torchvision.transforms.ToTensor(),
-                                    torchvision.transforms.Normalize(**normal_mean_var)])    
 
 
 def parseCmdline():
@@ -91,55 +81,6 @@ def write_openpcdet(frame_num, obj_pt_cloud_list_kitti, output_dir):
     # /for
 # /write_openpcdet()
 
-def loadPsmnet(psmnet_pretrained_weights, use_cuda):
-    psmnet = PSMNet.models.stackhourglass(maxdisp=192)
-    if use_cuda:
-        state_dict = torch.load(psmnet_pretrained_weights)
-    else:
-        state_dict = torch.load(psmnet_pretrained_weights, map_location=torch.device('cpu'))
-
-    psmnet = torch.nn.DataParallel(psmnet, device_ids=[0]) # required to be before load_state_dict()
-    psmnet.load_state_dict(state_dict['state_dict'])
-    psmnet.eval() # prep for inference
-    if use_cuda:
-        psmnet.cuda()
-    else:
-        psmnet.cpu()
-
-    return psmnet
-# /load_psmnet()
-
-def preprocessForPsmnet(imgL_in, imgR_in):
-    
-    # following steps from PSMNet Test_img.py
-    imgL = inference_transform(imgL_in)
-    imgR = inference_transform(imgR_in)
-
-    # pad to width and height to 16 times
-    top_pad = (16 - (imgL.shape[1] % 16)) % 16
-    right_pad = (16 - (imgL.shape[2] % 16)) % 16
-
-    imgL = torch.nn.functional.pad(imgL,(0,right_pad, top_pad,0)).unsqueeze(0)
-    imgR = torch.nn.functional.pad(imgR,(0,right_pad, top_pad,0)).unsqueeze(0)
-
-    return imgL, imgR
-# /preprocessForPsmnet()
-
-def psmnetDisparityField(psmnet, left_img, right_img, use_cuda):
-    psmnet_left_img, psmnet_right_img = \
-        preprocessForPsmnet(left_img, right_img)
-    if use_cuda:
-        psmnet_left_img.cuda()
-        psmnet_right_img.cuda()
-    with torch.no_grad():
-        disparity_field = psmnet(psmnet_left_img, psmnet_right_img)
-
-    disparity_field = torch.squeeze(disparity_field)
-    disparity_field_cpu = disparity_field.data.cpu().numpy()
-    print('\tmin disp = {}, max disp = {}'.format(np.min(disparity_field_cpu),
-                                                  np.max(disparity_field_cpu)))
-    return disparity_field_cpu
-# /psmnetDisparityField()
 
 def pointCloud(disparity_field, B, K):
     # H x W numpy array of float
@@ -388,8 +329,7 @@ def processFrames(kitti_raw_dataset, psmnet, yolonet, output_dir, use_cuda, dump
         #- left_img, right_img = np.array(left_img), np.array(right_img) # PIL --> numpy
 
         # H x W numpy array of float
-        disparity_field = \
-            psmnetDisparityField(psmnet, left_img, right_img, use_cuda)
+        disparity_field = psmnet.disparityField(left_img, right_img, use_cuda)
 
         # H x W array of 3D points in camera coords (x:right, y:down, z:forward)
         pt_cloud_field = pointCloud(disparity_field, B, K)
@@ -436,7 +376,7 @@ def main():
     args = parseCmdline()
     kitti_raw_dataset = \
         datasets.KittiRawDataset(args.base_dir, args.date, args.drive, args.frames)
-    psmnet = loadPsmnet(args.psmnet_pretrained_weights, args.use_cuda)
+    psmnet = psm.PyramidalStereoMatchingNet(args.psmnet_pretrained_weights, args.use_cuda)
     yolonet = yolov5.YOLOnet(args.yolov5_pretrained_weights, args.use_cuda)
     processFrames(kitti_raw_dataset, psmnet, yolonet, args.output_dir,
                   args.use_cuda, args.dump_openpcdet)
