@@ -1,6 +1,7 @@
 import numpy as np
 import argparse
 import sys
+import time
 
 import cv2 as cv
 import torch
@@ -11,6 +12,7 @@ import pykitti
 import datasets
 import psm
 import yolov5
+import opencv_sgbm
 
 
 def parseCmdline():
@@ -40,14 +42,18 @@ def parseCmdline():
                         action='store_true',
                         default=torch.cuda.is_available(),
                         help='Use GPU (CUDA) [default=True]')
+    parser.add_argument('--use_opencv_for_stereo',
+                        action='store_true',
+                        default=False,
+                        help='Use OpenCV Stereo SGBM for stereo disparity calculations, instead of PSMNet')
     parser.add_argument('--visualize_using_pptk',
                         action='store_true',
                         default=False,
                         help='Interactively visualize point clouds using PPTK viewer')
-    parser.add_argument('--dump_openpcdet',
+    parser.add_argument('--dump_objects_in_lidar_orientation',
                          action='store_true',
                          default=False,
-                         help='Write per-frame point cloud out into .npy file in OpenPCDet format')
+                         help='Write object point clouds, per-frame, into .npy files in LIDAR axes')
     args = parser.parse_args()
     args.frames = tuple([int(x) for x in args.frames.split(',')])
 
@@ -59,27 +65,27 @@ def parseCmdline():
     print('\toutput_dir = ', args.output_dir)
     print('\tpsmnet_pretrained_weights = ', args.psmnet_pretrained_weights)
     print('\tyolov5_pretrained_weights = ', args.yolov5_pretrained_weights)
+    print('\tuse_opencv_for_stereo = ', args.use_opencv_for_stereo)
     print('\tcuda = ', args.use_cuda)
     print('\tvisualize_using_pptk = ', args.visualize_using_pptk)
-    print('\tdump_openpcdet = ', args.dump_openpcdet)
-
+    print('\tdump_objects_in_lidar_orientation = ', args.dump_objects_in_lidar_orientation)
 
     return args
 # /parse_cmdline()
 
-def write_openpcdet(frame_num, obj_pt_cloud_list_kitti, output_dir):
+def dumpObjPointCloudInLidarOrientation(frame_num, obj_pt_cloud_list_left_stereo, output_dir):
     # KITTI coord system:  x:right, y:down, z:front
     # OpenPCD coord system: x:front, y:left, z:up
-    openpcd_from_kitti = np.array([[ 0,  0, 1],  # x <-- z
-                                   [-1,  0, 0],  # y <-- -x
-                                   [ 0, -1, 0]]) # z --> -y
-    for obj_num, obj_pt_cloud_kitti in enumerate(obj_pt_cloud_list_kitti):
-        obj_pt_cloud_openpcd = \
-            np.einsum('ij,nj->ni', openpcd_from_kitti, obj_pt_cloud_kitti)
+    lidar_from_stereo = np.array([[ 0,  0, 1],  # x <-- z
+                                  [-1,  0, 0],  # y <-- -x
+                                  [ 0, -1, 0]]) # z --> -y
+    for obj_num, obj_pt_cloud_stereo in enumerate(obj_pt_cloud_list_left_stereo):
+        obj_pt_cloud_lidar = \
+            np.einsum('ij,nj->ni', lidar_from_stereo, obj_pt_cloud_stereo)
         with(open(output_dir + '/' + f'frame_{frame_num:03}-obj_{obj_num:03}.npy', 'wb')) as f:
-            np.save(f, obj_pt_cloud_openpcd)
+            np.save(f, obj_pt_cloud_lidar)
     # /for
-# /write_openpcdet()
+# /dumpObjPointCloudInLidarOrientation()
 
 
 def pointCloud(disparity_field, B, K):
@@ -91,35 +97,17 @@ def pointCloud(disparity_field, B, K):
     pix_y_coords, pix_x_coords = np.meshgrid(range(disparity_field.shape[0]),
                                              range(disparity_field.shape[1]),
                                              indexing = 'ij')
-    # move origin to center of image
-    pix_x_coords = pix_x_coords - K[0,2]
-    pix_y_coords = pix_y_coords - K[1,2]
-    pt_cloud_init = np.dstack((pix_x_coords, pix_y_coords, np.ones(disparity_field.shape)))
-    K = K.copy() # modifying
-    K[0:2,2] = 0
+    pt_cloud_field = np.dstack((pix_x_coords, pix_y_coords, np.ones(disparity_field.shape)))
+
     # [X Y Z] = Z * K^{-1} [x y 1]^T
     K_inv = np.linalg.inv(K)
-    pt_cloud_field = z_field[:,:,np.newaxis] * np.einsum('ij,xyj->xyi', K_inv, pt_cloud_init)
-    print('\tmin-z = {}, max-z = {}'.format(np.min(pt_cloud_field[:,:,2]),
-                                            np.max(pt_cloud_field[:,:,2])))
+    pt_cloud_field = z_field[:,:,np.newaxis] * pt_cloud_field
+    pt_cloud_field = np.einsum('ij,xyj->xyi', K_inv, pt_cloud_field)
+    print('\tmin-z = {:.2f}, max-z = {:.2f}'.format(np.min(pt_cloud_field[:,:,2]),
+                                                    np.max(pt_cloud_field[:,:,2])))
     return pt_cloud_field
 # /pointCloud()
 
-
-class BoundingBox:
-    def __init__(self, array_of_3d_pts):
-        self.xmin = np.min(array_of_3d_pts[:,0])
-        self.xmax = np.max(array_of_3d_pts[:,0])
-        self.ymin = np.min(array_of_3d_pts[:,1])
-        self.ymax = np.max(array_of_3d_pts[:,1])
-        self.zmin = np.min(array_of_3d_pts[:,2])
-        self.zmax = np.max(array_of_3d_pts[:,2])
-    # /def __init__()
-
-    def __str__(self):
-        return f"({self.xmin:.2f}, {self.ymin:.2f}, {self.zmin:.2f}) -> ({self.xmax:.2f}, {self.ymax:.2f}, {self.zmax:.2f})"
-
-# /class BoundingBox
 
 class Oriented3dBoundingBox:
     def __init__(self, origin, axes, xmin, xmax, ymin, ymax, zmin, zmax):
@@ -182,6 +170,7 @@ class Oriented3dBoundingBox:
     # /draw()
 
 # /class Oriented3dBoundingBox
+
 
 
 def detect3dObjects(pt_cloud_field, bboxes2D):
@@ -290,54 +279,38 @@ def renderImages(frame_num, left_img, disparity_field, bboxes2D, bboxes3D, K, ou
     cv.imwrite(output_dir+'/'+f'{frame_num:03}-5_disp_pca.png', disp_pca_bb3d_img)
 # /renderImages()
 
-def renderDebugImg(img_name, disparity_field, bboxes2D, bboxes3D, K):
-    '''Converts disparity_field into an image.
-       Draws a yellow 2D bounding box around objects of interest.
-       Projects 3D bounding box onto the image (rgb colors for xyz directions).'''
-
-    img_data = (disparity_field / 192.0 * 255).astype(np.uint8)
-    img_data = np.dstack([img_data] * 3) # mono --> color (BGR order for OpenCV)
-    num_bboxes = len(bboxes2D)
-    assert num_bboxes == len(bboxes3D)
-    for n in range(num_bboxes):
-        bb3D = bboxes3D[n]
-        bb3D.draw(img_data, K)
-
-        bb2D = bboxes2D[n]
-        x1, y1, x2, y2 = bb2D
-        cv.rectangle(img_data,
-                    (x1, y1), (x2, y2),
-                    color=[0,175,175], # BGR order for OpenCV
-                    thickness=1, lineType=cv.LINE_AA)
-
-    cv.imwrite(img_name, img_data)
-# /renderDebugImg()
-
-def processFrames(kitti_raw_dataset, psmnet, yolonet, output_dir, use_cuda, dump_openpcdet):
+def processFrames(kitti_raw_dataset, psmnet, opencv_stereo, yolonet, args):
 
     #- B = kitti.calib.b_rgb # baseline, m
     #- K = kitti.calib.K_cam2.astype(np.float64) # intrinsics matrix for camera #2 (left stereo)
 
     for data_frame in kitti_raw_dataset:
         frame_num, left_img, right_img, B, K = data_frame
-        print('\nProcessing frame {}. Image size = {}'.format(frame_num, left_img.shape))
+        print(f'\nProcessing frame {frame_num}. Image size = {left_img.shape}')
         # B is baseline, in metres
         # K is intrinsic calibration matrix
 
-        #-  pair of H x W x C=3 numpy arrays
-        #- left_img, right_img = kitti.get_rgb(frame_num) # PIL images
-        #- left_img, right_img = np.array(left_img), np.array(right_img) # PIL --> numpy
+        begin_time_ns = time.time_ns()
 
         # H x W numpy array of float
-        disparity_field = psmnet.disparityField(left_img, right_img, use_cuda)
+        if args.use_opencv_for_stereo:
+            disparity_field = opencv_stereo.disparityField(left_img, right_img)
+        else:
+            disparity_field = psmnet.disparityField(left_img, right_img, args.use_cuda)
+        end_disparity_time_ns = time.time_ns()
+        print('\t@disparity: {:.2f} s'.format(1.0e-9 * (end_disparity_time_ns - begin_time_ns)))
 
         # H x W array of 3D points in camera coords (x:right, y:down, z:forward)
         pt_cloud_field = pointCloud(disparity_field, B, K)
+        end_point_cloud_time_ns = time.time_ns()
+        print('\t@point_cloud: {:.2f} s'.format(1.0e-9 * (end_point_cloud_time_ns - end_disparity_time_ns)))
 
         # YOLOv5
         # - bboxes2D: (N,4) array of N 2D bounding boxes, each in (x1,y1,x2,y2) format
         # - confidences: 1D array of confidences for each BB (N values)
-        bboxes2D, confidences = yolonet.detect(left_img, use_cuda)
+        bboxes2D, confidences = yolonet.detect(left_img, args.use_cuda)
+        end_yolonet_time_ns = time.time_ns()
+        print('\t@yolonet: {:.2f} s'.format(1.0e-9 * (end_yolonet_time_ns - end_point_cloud_time_ns)))
 
         # Diagnose objects
         for n, bb in enumerate(bboxes2D):
@@ -350,23 +323,22 @@ def processFrames(kitti_raw_dataset, psmnet, yolonet, output_dir, use_cuda, dump
 
         # Save intermediate results, for debug
         npz_filename = f'frame-{frame_num:03}.npz'
-        with open(output_dir + '/' + npz_filename, 'wb') as f:
+        with open(args.output_dir + '/' + npz_filename, 'wb') as f:
             np.savez(f, pt_cloud_field=pt_cloud_field,
                         bboxes2D=bboxes2D,
                         confidences=confidences)
 
         # list of Oriented3dBoundingBox
+        begin_detect_time_ns = time.time_ns()
         bboxes3D, obj_pt_clouds = detect3dObjects(pt_cloud_field, bboxes2D)
+        end_detect_time_ns = time.time_ns()
+        print('\t@detect: {:.3f} s'.format(1.0e-9 * (end_detect_time_ns - begin_detect_time_ns)))
 
-        # png_filename = f'disparity-frame-{frame_num:03}.png'
-        # renderDebugImg(output_dir + '/' + png_filename,
-        #                disparity_field,
-        #                bboxes2D, bboxes3D,
-        #                kitti.calib.K_cam2)
+        print('\t@frame {:.3f} s'.format(1.0e-9 * (end_detect_time_ns - begin_time_ns)))
 
-        renderImages(frame_num, left_img, disparity_field, bboxes2D, bboxes3D, K, output_dir)
-        if(dump_openpcdet):
-            write_openpcdet(frame_num, obj_pt_clouds, output_dir)
+        renderImages(frame_num, left_img, disparity_field, bboxes2D, bboxes3D, K, args.output_dir)
+        if(args.dump_objects_in_lidar_orientation):
+            dumpObjPointCloudInLidarOrientation(frame_num, obj_pt_clouds, args.output_dir)
     # /for frame_num
 
 # /processFrames()
@@ -376,10 +348,10 @@ def main():
     args = parseCmdline()
     kitti_raw_dataset = \
         datasets.KittiRawDataset(args.base_dir, args.date, args.drive, args.frames)
-    psmnet = psm.PyramidalStereoMatchingNet(args.psmnet_pretrained_weights, args.use_cuda)
+    psmnet = psm.PyramidalStereoMatchingNet(args.psmnet_pretrained_weights, args.use_cuda, max_disp=240)
+    opencv_stereo = opencv_sgbm.OpencvStereoSGBM(4, 192)
     yolonet = yolov5.YOLOnet(args.yolov5_pretrained_weights, args.use_cuda)
-    processFrames(kitti_raw_dataset, psmnet, yolonet, args.output_dir,
-                  args.use_cuda, args.dump_openpcdet)
+    processFrames(kitti_raw_dataset, psmnet, opencv_stereo, yolonet, args)
 # /main()
 
 if __name__ == "__main__":
