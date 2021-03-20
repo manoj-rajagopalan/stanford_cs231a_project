@@ -1,6 +1,11 @@
 # stanford_cs231a_project
 Stanford University CS231A project (from 3D Reconstruction to Recognition)
 
+See run.sh script for an example of how to run this project.
+You will need the following to be installed on the file system:
+- KITTI raw datasete
+- PSMNet pre-trained weights (.tar file)
+- YOLOv5 pre-trained weights (.pt file)
 
 Refs:
 * [KITTI dataset](http://www.cvlibs.net/datasets/kitti/index.php)
