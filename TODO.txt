@@ -1,0 +1,13 @@
+1. Object reconstruction
+   a. Plane fitting - RANSAC
+   b. Convex hull extraction
+   c. Line extraction - rotational scan or Hough Transform
+   d. Polygon construction
+   e. Texture extraction
+
+2. Comparison with ground-truth
+   a. KITTI detection set API
+   b. KITTI detection ground truth
+   c. Overlap comparisons
+
+3. Kalman Filter trackingx  
